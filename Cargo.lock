@@ -1368,6 +1368,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "exotica"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "eframe",
+ "egui_extras",
+ "image",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "winreg",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3381,20 +3395,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "roblox_optimizer"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "eframe",
- "egui_extras",
- "image",
- "serde",
- "serde_json",
- "sysinfo",
- "winreg",
 ]
 
 [[package]]

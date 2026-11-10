@@ -27,7 +27,7 @@
 
 ### Для обычных пользователей
 1. Перейди в раздел **[Releases](../../releases)** на этом GitHub.
-2. Скачай последний файл `exotica_launcher.exe`.
+2. Скачай последний файл `roblox_optimizer.exe`.
 3. Запусти файл. Лаунчер сам найдет установленный Roblox (в том числе из Xbox Game Pass).
 
 ### Для разработчиков
@@ -35,7 +35,7 @@
 
 ```bash
 # 1. Клонируй репозиторий
-git clone https://github.com/твой_ник/exotica-launcher.git
+git clone https://github.com/krzhwaydev/exotica-launcher.git
 cd exotica-launcher
 
 # 2. Собери оптимизированную версию (требуется установленный Rust и C++ Build Tools)

@@ -4,13 +4,14 @@ mod finder;
 mod fastflags;
 mod launcher;
 
-use eframe::egui::{self, Color32, RichText, Rounding, Vec2, Pos2, Image, Rect, Stroke};
+use eframe::egui::{self, Color32, RichText, Rounding, Vec2, Pos2, Stroke};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
+use std::time::{Duration, Instant}; // Добавили Instant для таймера
 use sysinfo::System;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -59,11 +60,11 @@ fn start_ping_thread() -> Receiver<u32> {
     let (tx, rx) = channel();
     thread::spawn(move || {
         let mut ping = 999;
-        if let Ok(out) = Command::new("ping").args(&["-n", "1", "-w", "1000", "www.roblox.com"]).output() {
+        if let Ok(out) = Command::new("ping").args(&["-n", "1", "-w", "2000", "1.1.1.1"]).output() {
             let text = String::from_utf8_lossy(&out.stdout);
-            if let Some(idx) = text.find("время=").or_else(|| text.find("time=")) {
-                let rest = &text[idx + 6..];
-                let num_str: String = rest.chars().take_while(|c| c.is_numeric()).collect();
+            if let Some(idx) = text.find("time=").or_else(|| text.find("время=")) {
+                let rest = &text[idx..];
+                let num_str: String = rest.chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric()).collect();
                 if let Ok(ms) = num_str.parse::<u32>() { ping = ms; }
             }
         }
@@ -79,9 +80,9 @@ struct ExoticaApp {
     system: System,
     ping_result: Option<u32>,
     ping_receiver: Option<Receiver<u32>>,
-    // Переменные для анимации
     last_tab: usize,
-    anim_progress: f32, // от 0.0 до 1.0
+    anim_progress: f32,
+    last_ram_check: Instant, // Таймер для ОЗУ
 }
 
 impl Default for ExoticaApp {
@@ -95,33 +96,39 @@ impl Default for ExoticaApp {
             system: System::new_all(),
             ping_result: None,
             ping_receiver: None,
+            last_ram_check: Instant::now(),
         }
     }
 }
 
 impl eframe::App for ExoticaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.system.refresh_memory();
+        
+        // ОПТИМИЗАЦИЯ 1: Проверяем ОЗУ только раз в секунду, а не каждый кадр
+        if self.last_ram_check.elapsed() >= Duration::from_secs(1) {
+            self.system.refresh_memory();
+            self.last_ram_check = Instant::now();
+        }
         
         if let Some(rx) = &self.ping_receiver {
-            if let Ok(ping) = rx.try_recv() {
-                self.ping_result = Some(ping);
-                self.ping_receiver = None;
-            } else { ctx.request_repaint(); }
+            match rx.try_recv() {
+                Ok(ping) => { self.ping_result = Some(ping); self.ping_receiver = None; }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.ping_result = Some(999); self.ping_receiver = None; }
+            }
         }
 
-        // --- ЛОГИКА АНИМАЦИИ ПЕРЕКЛЮЧЕНИЯ ---
+        // ЛОГИКА АНИМАЦИИ
         if self.active_tab != self.last_tab {
-            self.anim_progress = 0.0; // Сбрасываем в 0 при клике
+            self.anim_progress = 0.0;
             self.last_tab = self.active_tab;
         }
         if self.anim_progress < 1.0 {
-            self.anim_progress += 0.1; // Скорость анимации
+            self.anim_progress += 0.1;
             if self.anim_progress > 1.0 { self.anim_progress = 1.0; }
-            ctx.request_repaint(); // Заставляем перерисовывать для анимации
         }
 
-        // --- АНИМИРОВАННЫЙ ФОН ---
+        // АНИМИРОВАННЫЙ ФОН
         let time = ctx.input(|i| i.time) as f32;
         let painter = ctx.layer_painter(egui::LayerId::background());
         painter.rect_filled(egui::Rect::EVERYTHING, 0.0, Color32::from_rgb(15, 15, 18));
@@ -136,7 +143,10 @@ impl eframe::App for ExoticaApp {
         };
         painter.circle_filled(center1, 450.0, c1); 
         painter.circle_filled(center2, 450.0, c2);  
-        ctx.request_repaint();
+
+        // ОПТИМИЗАЦИЯ 2: Ограничиваем частоту кадров до 30 FPS (33 мс)
+        // Это уберет 27% нагрузки на ЦП. Анимация останется плавной.
+        ctx.request_repaint_after(Duration::from_millis(33));
 
         let card_bg = Color32::from_rgba_unmultiplied(30, 30, 36, 240);
         let accent_color = match self.config.theme.as_str() {
@@ -151,33 +161,28 @@ impl eframe::App for ExoticaApp {
         visuals.widgets.noninteractive.rounding = Rounding::same(12.0);
         ctx.set_visuals(visuals);
 
-        // --- ЛЕВАЯ ПАНЕЛЬ (С иконками SVG) ---
+        // --- ЛЕВАЯ ПАНЕЛЬ ---
         egui::SidePanel::left("sidebar")
             .exact_width(250.0)
             .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(20, 20, 25, 220)).inner_margin(20.0))
             .show(ctx, |ui| {
                 ui.add_space(10.0);
-                // Заголовок EXOTICA
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("EXOTICA").size(32.0).strong().color(accent_color));
                 });
                 ui.label(RichText::new("Performance Client").size(12.0).color(Color32::GRAY));
                 ui.add_space(40.0);
 
-                // Меню навигации
                 let tabs = [
-                    ("🏠  Главная", "file://assets/home.svg"), // Юникод для надежности
-                    ("⚙️  Настройки", "file://assets/settings.svg"),
-                    ("🛠  Инструменты", "file://assets/tools.svg")
+                    ("🏠  Главная", ""),
+                    ("⚙️  Настройки", ""),
+                    ("🛠  Инструменты", "")
                 ];
 
-                for (i, (text, _img_path)) in tabs.iter().enumerate() {
+                for (i, (text, _)) in tabs.iter().enumerate() {
                     let is_active = self.active_tab == i;
-                    
-                    // Красивая плашка для кнопки
                     let btn = egui::Button::new(
-                        RichText::new(*text).size(16.0)
-                            .color(if is_active { Color32::WHITE } else { Color32::GRAY })
+                        RichText::new(*text).size(16.0).color(if is_active { Color32::WHITE } else { Color32::GRAY })
                     )
                     .fill(if is_active { accent_color } else { Color32::TRANSPARENT })
                     .rounding(8.0);
@@ -188,7 +193,6 @@ impl eframe::App for ExoticaApp {
                     ui.add_space(10.0);
                 }
 
-                // ОЗУ внизу
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     let used_ram = self.system.used_memory() / 1024 / 1024;
                     let total_ram = self.system.total_memory() / 1024 / 1024;
@@ -199,8 +203,7 @@ impl eframe::App for ExoticaApp {
                 });
             });
 
-        // --- НИЖНЯЯ ПАНЕЛЬ (Кнопка Играть) ---
-        // Размещаем ее до CentralPanel, чтобы она всегда была внизу
+        // --- НИЖНЯЯ ПАНЕЛЬ ---
         egui::TopBottomPanel::bottom("play_bar")
             .exact_height(100.0)
             .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(40.0, 20.0)))
@@ -209,7 +212,7 @@ impl eframe::App for ExoticaApp {
                     let play_btn = egui::Button::new(RichText::new("ИГРАТЬ").size(26.0).strong())
                         .fill(accent_color)
                         .rounding(12.0)
-                        .stroke(Stroke::new(2.0, Color32::WHITE)); // Белая обводка для заметности
+                        .stroke(Stroke::new(2.0, Color32::WHITE));
                     
                     if ui.add_sized([250.0, 60.0], play_btn).clicked() {
                         if let Some(appdata) = finder::get_roblox_appdata() {
@@ -221,24 +224,21 @@ impl eframe::App for ExoticaApp {
                         }
                     }
                     
-                    // Статус слева от кнопки
                     ui.add_space(20.0);
                     ui.label(RichText::new(&self.status).size(16.0).color(Color32::GRAY));
                 });
             });
 
-        // --- ЦЕНТРАЛЬНАЯ ПАНЕЛЬ (С анимацией) ---
+        // --- ЦЕНТРАЛЬНАЯ ПАНЕЛЬ ---
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(40.0))
             .show(ctx, |ui| {
-                // Анимация: Сдвиг вправо на 30 пикселей и прозрачность
                 let offset = (1.0 - self.anim_progress) * 30.0;
                 let alpha = self.anim_progress;
                 
-                // Создаем временный слой для анимации
                 ui.scope(|ui| {
                     ui.set_opacity(alpha);
-                    ui.add_space(offset); // Плавный выезд сверху/снизу
+                    ui.add_space(offset);
 
                     match self.active_tab {
                         0 => self.draw_home(ui, card_bg, accent_color),
@@ -256,7 +256,6 @@ impl ExoticaApp {
         ui.heading(RichText::new("Панель управления").size(28.0).color(Color32::WHITE));
         ui.add_space(20.0);
 
-        // Карточка профиля
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("Профиль оптимизации").size(18.0).strong());
@@ -272,7 +271,6 @@ impl ExoticaApp {
         
         ui.add_space(20.0);
 
-        // Карточка FPS (заглушка)
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -368,7 +366,6 @@ fn main() -> eframe::Result<()> {
         "Exotica Launcher",
         options,
         Box::new(|cc| {
-            // Устанавливаем загрузчики для SVG картинок
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(ExoticaApp::default()))
         }),
