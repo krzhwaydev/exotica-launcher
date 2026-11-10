@@ -1,6 +1,6 @@
 [package]
 name = "exotica"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -12,3 +12,4 @@ dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sysinfo = "0.30"
+regex = "1.10"

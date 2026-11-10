@@ -1,28 +1,57 @@
+// Скрываем консоль при запуске готового .exe файла
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+// Версия приложения
+const APP_VERSION: &str = "0.3.0";
 
 mod finder;
 mod fastflags;
 mod launcher;
 
-use eframe::egui::{self, Color32, RichText, Rounding, Vec2, Pos2, Stroke};
+use eframe::egui::{self, Color32, RichText, Rounding, Pos2, Stroke};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
-use std::time::{Duration, Instant}; // Добавили Instant для таймера
+use std::time::{Duration, Instant};
+
+// Оставляем функции, даже если они пока не используются, 
+// чтобы компилятор не ругался (понадобятся для анимаций)
+#[allow(dead_code)]
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+#[allow(dead_code)]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 use sysinfo::System;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ExoticaConfig {
     active_profile: String,
     theme: String,
+    #[serde(default)]
+    processes_to_kill: Vec<String>,
 }
 
 impl Default for ExoticaConfig {
     fn default() -> Self {
-        Self { active_profile: "fps".to_string(), theme: "red".to_string() }
+        Self {
+            active_profile: "fps".to_string(),
+            theme: "red".to_string(),
+            processes_to_kill: vec![
+                "chrome.exe".to_string(),
+                "discord.exe".to_string(),
+                "telegram.exe".to_string(),
+                "opera.exe".to_string(),
+                "steam.exe".to_string(),
+            ],
+        }
     }
 }
 
@@ -36,7 +65,9 @@ fn get_config_path() -> PathBuf {
 fn load_config() -> ExoticaConfig {
     if let Ok(content) = fs::read_to_string(get_config_path()) {
         serde_json::from_str(&content).unwrap_or_default()
-    } else { ExoticaConfig::default() }
+    } else {
+        ExoticaConfig::default()
+    }
 }
 
 fn save_config(config: &ExoticaConfig) {
@@ -45,12 +76,13 @@ fn save_config(config: &ExoticaConfig) {
     }
 }
 
-fn run_game_booster() -> String {
-    let processes = ["chrome.exe", "discord.exe", "telegram.exe", "opera.exe", "steam.exe"];
+fn run_game_booster(processes: &[String]) -> String {
     let mut killed = 0;
     for process in processes {
-        if let Ok(out) = Command::new("taskkill").args(&["/F", "/IM", process, "/T"]).output() {
-            if out.status.success() { killed += 1; }
+        if let Ok(out) = Command::new("taskkill").args(["/F", "/IM", process, "/T"]).output() {
+            if out.status.success() {
+                killed += 1;
+            }
         }
     }
     format!("Освобождено! Закрыто процессов: {}", killed)
@@ -60,12 +92,14 @@ fn start_ping_thread() -> Receiver<u32> {
     let (tx, rx) = channel();
     thread::spawn(move || {
         let mut ping = 999;
-        if let Ok(out) = Command::new("ping").args(&["-n", "1", "-w", "2000", "1.1.1.1"]).output() {
+        if let Ok(out) = Command::new("ping").args(["-n", "1", "-w", "2000", "1.1.1.1"]).output() {
             let text = String::from_utf8_lossy(&out.stdout);
             if let Some(idx) = text.find("time=").or_else(|| text.find("время=")) {
                 let rest = &text[idx..];
                 let num_str: String = rest.chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric()).collect();
-                if let Ok(ms) = num_str.parse::<u32>() { ping = ms; }
+                if let Ok(ms) = num_str.parse::<u32>() {
+                    ping = ms;
+                }
             }
         }
         let _ = tx.send(ping);
@@ -82,86 +116,105 @@ struct ExoticaApp {
     ping_receiver: Option<Receiver<u32>>,
     last_tab: usize,
     anim_progress: f32,
-    last_ram_check: Instant, // Таймер для ОЗУ
+    last_ram_check: Instant,
+    // UI state for process editor
+    show_processes_editor: bool,
+    processes_editor_input: String,
 }
 
 impl Default for ExoticaApp {
     fn default() -> Self {
-        Self { 
-            config: load_config(), 
+        Self {
+            config: load_config(),
             status: "Roblox успешно найден".to_string(),
             active_tab: 0,
             last_tab: 0,
             anim_progress: 1.0,
-            system: System::new_all(),
+            system: {
+                let mut sys = System::new();
+                sys.refresh_memory();
+                sys
+            },
             ping_result: None,
             ping_receiver: None,
             last_ram_check: Instant::now(),
+            show_processes_editor: false,
+            processes_editor_input: String::new(),
         }
     }
 }
 
 impl eframe::App for ExoticaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        
-        // ОПТИМИЗАЦИЯ 1: Проверяем ОЗУ только раз в секунду, а не каждый кадр
+        // Обновление RAM раз в секунду
         if self.last_ram_check.elapsed() >= Duration::from_secs(1) {
             self.system.refresh_memory();
             self.last_ram_check = Instant::now();
         }
-        
+        // Обработка ping результата
         if let Some(rx) = &self.ping_receiver {
             match rx.try_recv() {
-                Ok(ping) => { self.ping_result = Some(ping); self.ping_receiver = None; }
+                Ok(ping) => {
+                    self.ping_result = Some(ping);
+                    self.ping_receiver = None;
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.ping_result = Some(999); self.ping_receiver = None; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.ping_result = Some(999);
+                    self.ping_receiver = None;
+                }
             }
         }
-
-        // ЛОГИКА АНИМАЦИИ
+        // Анимация смены вкладок
         if self.active_tab != self.last_tab {
             self.anim_progress = 0.0;
             self.last_tab = self.active_tab;
         }
         if self.anim_progress < 1.0 {
             self.anim_progress += 0.1;
-            if self.anim_progress > 1.0 { self.anim_progress = 1.0; }
+            if self.anim_progress > 1.0 {
+                self.anim_progress = 1.0;
+            }
         }
-
-        // АНИМИРОВАННЫЙ ФОН
+        // Фоновая анимация
         let time = ctx.input(|i| i.time) as f32;
         let painter = ctx.layer_painter(egui::LayerId::background());
         painter.rect_filled(egui::Rect::EVERYTHING, 0.0, Color32::from_rgb(15, 15, 18));
-
         let center1 = Pos2::new(600.0 + (time * 0.5).sin() * 150.0, 300.0 + (time * 0.7).cos() * 150.0);
         let center2 = Pos2::new(300.0 + (time * 0.3).cos() * 150.0, 500.0 + (time * 0.4).sin() * 150.0);
-        
         let (c1, c2) = match self.config.theme.as_str() {
             "blue" => (Color32::from_rgba_unmultiplied(0, 150, 255, 20), Color32::from_rgba_unmultiplied(0, 50, 150, 15)),
             "purple" => (Color32::from_rgba_unmultiplied(150, 0, 255, 20), Color32::from_rgba_unmultiplied(50, 0, 150, 15)),
             _ => (Color32::from_rgba_unmultiplied(255, 50, 50, 20), Color32::from_rgba_unmultiplied(150, 0, 0, 15)),
         };
-        painter.circle_filled(center1, 450.0, c1); 
-        painter.circle_filled(center2, 450.0, c2);  
-
-        // ОПТИМИЗАЦИЯ 2: Ограничиваем частоту кадров до 30 FPS (33 мс)
-        // Это уберет 27% нагрузки на ЦП. Анимация останется плавной.
+        painter.circle_filled(center1, 450.0, c1);
+        painter.circle_filled(center2, 450.0, c2);
         ctx.request_repaint_after(Duration::from_millis(33));
-
+        
+        // Общие стили UI
         let card_bg = Color32::from_rgba_unmultiplied(30, 30, 36, 240);
         let accent_color = match self.config.theme.as_str() {
             "blue" => Color32::from_rgb(0, 150, 255),
             "purple" => Color32::from_rgb(150, 0, 255),
             _ => Color32::from_rgb(220, 50, 50),
         };
-
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::TRANSPARENT;
         visuals.widgets.noninteractive.bg_fill = card_bg;
         visuals.widgets.noninteractive.rounding = Rounding::same(12.0);
         ctx.set_visuals(visuals);
-
-        // --- ЛЕВАЯ ПАНЕЛЬ ---
+        
+        // Верхняя панель с названием и версией
+        egui::TopBottomPanel::top("top_bar").exact_height(40.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Exotica Launcher").size(20.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(APP_VERSION).size(12.0).weak());
+                });
+            });
+        });
+        
+        // Левая боковая панель
         egui::SidePanel::left("sidebar")
             .exact_width(250.0)
             .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(20, 20, 25, 220)).inner_margin(20.0))
@@ -172,13 +225,11 @@ impl eframe::App for ExoticaApp {
                 });
                 ui.label(RichText::new("Performance Client").size(12.0).color(Color32::GRAY));
                 ui.add_space(40.0);
-
                 let tabs = [
                     ("🏠  Главная", ""),
                     ("⚙️  Настройки", ""),
-                    ("🛠  Инструменты", "")
+                    ("🛠  Инструменты", ""),
                 ];
-
                 for (i, (text, _)) in tabs.iter().enumerate() {
                     let is_active = self.active_tab == i;
                     let btn = egui::Button::new(
@@ -186,24 +237,37 @@ impl eframe::App for ExoticaApp {
                     )
                     .fill(if is_active { accent_color } else { Color32::TRANSPARENT })
                     .rounding(8.0);
-
+                    
                     if ui.add_sized([210.0, 45.0], btn).clicked() {
-                        self.active_tab = i;
+                        self.active_tab = i; // Исправлено: теперь вкладка переключается!
                     }
                     ui.add_space(10.0);
                 }
-
+                
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     let used_ram = self.system.used_memory() / 1024 / 1024;
                     let total_ram = self.system.total_memory() / 1024 / 1024;
                     ui.add(egui::ProgressBar::new(used_ram as f32 / total_ram as f32)
                         .fill(accent_color)
                         .text(RichText::new(format!("RAM: {} MB", used_ram)).size(12.0)));
+                    ui.add_space(15.0);
+                    if ui.add(egui::Button::new(RichText::new("❤️ Поддержать").size(14.0)).fill(Color32::from_rgb(40, 20, 20)).rounding(6.0)).clicked() {
+                        let _ = Command::new("cmd").args(["/C", "start", "https://boosty.to/"]).spawn();
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🐈 GitHub").clicked() {
+                            let _ = Command::new("cmd").args(["/C", "start", "https://github.com/krzhwaydev/exotica-launcher"]).spawn();
+                        }
+                        if ui.button("✈️ Telegram").clicked() {
+                            let _ = Command::new("cmd").args(["/C", "start", "https://t.me/ExoticaLauncher"]).spawn();
+                        }
+                    });
                     ui.add_space(10.0);
                 });
             });
-
-        // --- НИЖНЯЯ ПАНЕЛЬ ---
+            
+        // Нижняя панель (Play Bar)
         egui::TopBottomPanel::bottom("play_bar")
             .exact_height(100.0)
             .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(40.0, 20.0)))
@@ -212,34 +276,32 @@ impl eframe::App for ExoticaApp {
                     let play_btn = egui::Button::new(RichText::new("ИГРАТЬ").size(26.0).strong())
                         .fill(accent_color)
                         .rounding(12.0)
-                        .stroke(Stroke::new(2.0, Color32::WHITE));
-                    
+                        .stroke(Stroke::new(2.0_f32, Color32::WHITE)); // Исправлено: 2.0_f32
                     if ui.add_sized([250.0, 60.0], play_btn).clicked() {
                         if let Some(appdata) = finder::get_roblox_appdata() {
                             let _ = fastflags::write_fastflags(&appdata, &self.config.active_profile);
-                        }
-                        match launcher::launch_roblox() {
-                            Ok(_) => self.status = "Игра запущена!".to_string(),
-                            Err(e) => self.status = format!("Ошибка: {}", e),
+                            match launcher::launch_roblox() {
+                                Ok(_) => self.status = "Игра запущена!".to_string(),
+                                Err(e) => self.status = format!("Ошибка: {}", e),
+                            }
+                        } else {
+                            self.status = "Roblox не найден в AppData".to_string();
                         }
                     }
-                    
                     ui.add_space(20.0);
                     ui.label(RichText::new(&self.status).size(16.0).color(Color32::GRAY));
                 });
             });
-
-        // --- ЦЕНТРАЛЬНАЯ ПАНЕЛЬ ---
+            
+        // Центральная панель
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(40.0))
             .show(ctx, |ui| {
                 let offset = (1.0 - self.anim_progress) * 30.0;
                 let alpha = self.anim_progress;
-                
                 ui.scope(|ui| {
                     ui.set_opacity(alpha);
                     ui.add_space(offset);
-
                     match self.active_tab {
                         0 => self.draw_home(ui, card_bg, accent_color),
                         1 => self.draw_settings(ui, card_bg, accent_color),
@@ -248,6 +310,33 @@ impl eframe::App for ExoticaApp {
                     }
                 });
             });
+            
+        // Окно редактирования списка процессов
+        if self.show_processes_editor {
+            egui::Window::new("Настройка процессов для Game Booster")
+                .default_width(300.0)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label("Введите имена процессов (по одному в строке):");
+                    ui.add(egui::TextEdit::multiline(&mut self.processes_editor_input).desired_rows(6));
+                    ui.horizontal(|ui| {
+                        if ui.button("Сохранить").clicked() {
+                            let new_list: Vec<String> = self.processes_editor_input
+                                .lines()
+                                .map(|l| l.trim().to_string())
+                                .filter(|l| !l.is_empty())
+                                .collect();
+                            self.config.processes_to_kill = new_list;
+                            save_config(&self.config);
+                            self.show_processes_editor = false;
+                        }
+                        if ui.button("Отмена").clicked() {
+                            self.show_processes_editor = false;
+                        }
+                    });
+                });
+        }
     }
 }
 
@@ -255,7 +344,6 @@ impl ExoticaApp {
     fn draw_home(&mut self, ui: &mut egui::Ui, card_bg: Color32, accent: Color32) {
         ui.heading(RichText::new("Панель управления").size(28.0).color(Color32::WHITE));
         ui.add_space(20.0);
-
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("Профиль оптимизации").size(18.0).strong());
@@ -268,9 +356,7 @@ impl ExoticaApp {
                 self.profile_btn(ui, "quality", "QUALITY", accent);
             });
         });
-        
         ui.add_space(20.0);
-
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -281,27 +367,34 @@ impl ExoticaApp {
             });
         });
     }
-
-    fn draw_settings(&mut self, ui: &mut egui::Ui, card_bg: Color32, accent: Color32) {
+    
+    fn draw_settings(&mut self, ui: &mut egui::Ui, card_bg: Color32, _accent: Color32) {
         ui.heading(RichText::new("Настройки").size(28.0).color(Color32::WHITE));
         ui.add_space(20.0);
-
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("Оформление").size(18.0).strong());
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.selectable_label(self.config.theme == "red", "🔴 Красная").clicked() { self.config.theme = "red".to_string(); save_config(&self.config); }
-                if ui.selectable_label(self.config.theme == "blue", "🔵 Синяя").clicked() { self.config.theme = "blue".to_string(); save_config(&self.config); }
-                if ui.selectable_label(self.config.theme == "purple", "🟣 Фиолетовая").clicked() { self.config.theme = "purple".to_string(); save_config(&self.config); }
+                if ui.selectable_label(self.config.theme == "red", "🔴 Красная").clicked() {
+                    self.config.theme = "red".to_string();
+                    save_config(&self.config);
+                }
+                if ui.selectable_label(self.config.theme == "blue", "🔵 Синяя").clicked() {
+                    self.config.theme = "blue".to_string();
+                    save_config(&self.config);
+                }
+                if ui.selectable_label(self.config.theme == "purple", "🟣 Фиолетовая").clicked() {
+                    self.config.theme = "purple".to_string();
+                    save_config(&self.config);
+                }
             });
         });
     }
-
+    
     fn draw_tools(&mut self, ui: &mut egui::Ui, card_bg: Color32, accent: Color32) {
         ui.heading(RichText::new("Инструменты").size(28.0).color(Color32::WHITE));
         ui.add_space(20.0);
-
         ui.horizontal(|ui| {
             egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
                 ui.set_width(300.0);
@@ -310,12 +403,15 @@ impl ExoticaApp {
                 ui.label(RichText::new("Закроет фоновые процессы.").size(12.0).color(Color32::GRAY));
                 ui.add_space(15.0);
                 if ui.add_sized([250.0, 40.0], egui::Button::new("🚀 ОСВОБОДИТЬ РЕСУРСЫ").fill(accent)).clicked() {
-                    self.status = run_game_booster();
+                    self.status = run_game_booster(&self.config.processes_to_kill);
+                }
+                ui.add_space(10.0);
+                if ui.button("Настроить список").clicked() {
+                    self.processes_editor_input = self.config.processes_to_kill.join("\n");
+                    self.show_processes_editor = true;
                 }
             });
-
             ui.add_space(20.0);
-
             egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
                 ui.set_width(300.0);
                 ui.label(RichText::new("Пинг").size(18.0).strong());
@@ -330,22 +426,21 @@ impl ExoticaApp {
                 ui.label(RichText::new(ping_text).size(16.0).color(ping_color));
                 ui.add_space(15.0);
                 let is_pinging = self.ping_receiver.is_some();
-                let text = if is_pinging { "⏳..." } else { "📡 ПРОВЕРИТЬ" };
-                if ui.add_enabled(!is_pinging, egui::Button::new(text)).clicked() {
+                let txt = if is_pinging { "⏳..." } else { "📡 ПРОВЕРИТЬ" };
+                if ui.add_enabled(!is_pinging, egui::Button::new(txt)).clicked() {
                     self.ping_receiver = Some(start_ping_thread());
                     self.ping_result = None;
                 }
             });
         });
     }
-
+    
     fn profile_btn(&mut self, ui: &mut egui::Ui, id: &str, text: &str, accent: Color32) {
         let is_active = self.config.active_profile == id;
         let btn = egui::Button::new(RichText::new(text).size(14.0).color(if is_active { Color32::WHITE } else { Color32::GRAY }))
             .fill(if is_active { accent } else { Color32::TRANSPARENT })
-            .stroke(if is_active { Stroke::NONE } else { Stroke::new(1.0, Color32::GRAY) })
+            .stroke(if is_active { Stroke::NONE } else { Stroke::new(1.0_f32, Color32::GRAY) })
             .rounding(8.0);
-
         if ui.add_sized([150.0, 45.0], btn).clicked() {
             self.config.active_profile = id.to_string();
             save_config(&self.config);
@@ -357,11 +452,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_maximized(true)
-            .with_decorations(true) 
+            .with_decorations(true)
             .with_transparent(true),
         ..Default::default()
     };
-
     eframe::run_native(
         "Exotica Launcher",
         options,

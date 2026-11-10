@@ -1369,12 +1369,13 @@ dependencies = [
 
 [[package]]
 name = "exotica"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "dirs",
  "eframe",
  "egui_extras",
  "image",
+ "regex",
  "serde",
  "serde_json",
  "sysinfo",
