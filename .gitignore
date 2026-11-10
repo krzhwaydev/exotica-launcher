@@ -1,0 +1,13 @@
+# Скомпилированные файлы Rust
+/target/
+**/*.rs.bk
+
+# Файлы IDE и редакторов
+.vscode/
+.idea/
+*.iml
+
+# Файлы операционной системы
+.DS_Store
+Thumbs.db
+*.log
