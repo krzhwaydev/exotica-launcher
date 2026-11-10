@@ -24,4 +24,5 @@ jobs:
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/roblox_optimizer.exe
+          tag_name: ${{ github.ref_name }} # <--- ВОТ ЭТА СТРОЧКА ЖЕСТКО ПРИВЯЖЕТ ФАЙЛ К ТЕГУ
+          files: target/release/exotica.exe # <--- ПРОВЕРЬ ИМЯ ФАЙЛА (у тебя exotica или roblox_optimizer?)
