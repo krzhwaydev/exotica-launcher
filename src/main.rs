@@ -2,11 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 // Версия приложения
-const APP_VERSION: &str = "0.3.0";
+const APP_VERSION: &str = "0.4.0";
 
 mod finder;
 mod fastflags;
 mod launcher;
+mod updater; // <--- Подключаем наш новый модуль
 
 use eframe::egui::{self, Color32, RichText, Rounding, Pos2, Stroke};
 use serde::{Deserialize, Serialize};
@@ -17,8 +18,6 @@ use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// Оставляем функции, даже если они пока не используются, 
-// чтобы компилятор не ругался (понадобятся для анимаций)
 #[allow(dead_code)]
 fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
@@ -107,6 +106,17 @@ fn start_ping_thread() -> Receiver<u32> {
     rx
 }
 
+// Функция для вытаскивания ID плейса из ссылки
+fn extract_place_id(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty() {
+        return Some(s.to_string());
+    }
+    let part = s.split("/games/").nth(1)?;
+    let id: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 struct ExoticaApp {
     config: ExoticaConfig,
     status: String,
@@ -117,9 +127,12 @@ struct ExoticaApp {
     last_tab: usize,
     anim_progress: f32,
     last_ram_check: Instant,
-    // UI state for process editor
     show_processes_editor: bool,
     processes_editor_input: String,
+    // НОВЫЕ ПОЛЯ ДЛЯ 0.4.0
+    update_url: Option<String>,
+    update_downloading: bool,
+    place_input: String,
 }
 
 impl Default for ExoticaApp {
@@ -140,18 +153,21 @@ impl Default for ExoticaApp {
             last_ram_check: Instant::now(),
             show_processes_editor: false,
             processes_editor_input: String::new(),
+            update_url: None,
+            update_downloading: false,
+            place_input: String::new(),
         }
     }
 }
 
 impl eframe::App for ExoticaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Обновление RAM раз в секунду
+        // Обновление RAM
         if self.last_ram_check.elapsed() >= Duration::from_secs(1) {
             self.system.refresh_memory();
             self.last_ram_check = Instant::now();
         }
-        // Обработка ping результата
+        // Ping
         if let Some(rx) = &self.ping_receiver {
             match rx.try_recv() {
                 Ok(ping) => {
@@ -165,7 +181,21 @@ impl eframe::App for ExoticaApp {
                 }
             }
         }
-        // Анимация смены вкладок
+        // Проверка обновлений (запускается 1 раз в фоне при старте)
+        if self.update_url.is_none() && !self.update_downloading {
+            let version = APP_VERSION.to_string();
+            let (tx, rx) = channel();
+            thread::spawn(move || {
+                let url = updater::check_update(&version);
+                let _ = tx.send(url);
+            });
+            // Ждем результат не блокируя UI
+            if let Ok(url_opt) = rx.try_recv() {
+                self.update_url = url_opt;
+            }
+        }
+
+        // Анимация вкладок
         if self.active_tab != self.last_tab {
             self.anim_progress = 0.0;
             self.last_tab = self.active_tab;
@@ -176,7 +206,8 @@ impl eframe::App for ExoticaApp {
                 self.anim_progress = 1.0;
             }
         }
-        // Фоновая анимация
+        
+        // Фон
         let time = ctx.input(|i| i.time) as f32;
         let painter = ctx.layer_painter(egui::LayerId::background());
         painter.rect_filled(egui::Rect::EVERYTHING, 0.0, Color32::from_rgb(15, 15, 18));
@@ -191,8 +222,9 @@ impl eframe::App for ExoticaApp {
         painter.circle_filled(center2, 450.0, c2);
         ctx.request_repaint_after(Duration::from_millis(33));
         
-        // Общие стили UI
-        let card_bg = Color32::from_rgba_unmultiplied(30, 30, 36, 240);
+        // Стили
+        // Делаем фон карточек полупрозрачным для эффекта "стекла"
+        let card_bg = Color32::from_rgba_unmultiplied(30, 30, 36, 180); 
         let accent_color = match self.config.theme.as_str() {
             "blue" => Color32::from_rgb(0, 150, 255),
             "purple" => Color32::from_rgb(150, 0, 255),
@@ -204,17 +236,17 @@ impl eframe::App for ExoticaApp {
         visuals.widgets.noninteractive.rounding = Rounding::same(12.0);
         ctx.set_visuals(visuals);
         
-        // Верхняя панель с названием и версией
+        // Верхняя панель
         egui::TopBottomPanel::top("top_bar").exact_height(40.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Exotica Launcher").size(20.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(APP_VERSION).size(12.0).weak());
+                    ui.label(RichText::new(format!("v{}", APP_VERSION)).size(12.0).weak());
                 });
             });
         });
         
-        // Левая боковая панель
+        // Левая панель
         egui::SidePanel::left("sidebar")
             .exact_width(250.0)
             .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(20, 20, 25, 220)).inner_margin(20.0))
@@ -239,7 +271,7 @@ impl eframe::App for ExoticaApp {
                     .rounding(8.0);
                     
                     if ui.add_sized([210.0, 45.0], btn).clicked() {
-                        self.active_tab = i; // Исправлено: теперь вкладка переключается!
+                        self.active_tab = i;
                     }
                     ui.add_space(10.0);
                 }
@@ -267,7 +299,7 @@ impl eframe::App for ExoticaApp {
                 });
             });
             
-        // Нижняя панель (Play Bar)
+        // Нижняя панель
         egui::TopBottomPanel::bottom("play_bar")
             .exact_height(100.0)
             .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(40.0, 20.0)))
@@ -276,7 +308,7 @@ impl eframe::App for ExoticaApp {
                     let play_btn = egui::Button::new(RichText::new("ИГРАТЬ").size(26.0).strong())
                         .fill(accent_color)
                         .rounding(12.0)
-                        .stroke(Stroke::new(2.0_f32, Color32::WHITE)); // Исправлено: 2.0_f32
+                        .stroke(Stroke::new(2.0_f32, Color32::WHITE));
                     if ui.add_sized([250.0, 60.0], play_btn).clicked() {
                         if let Some(appdata) = finder::get_roblox_appdata() {
                             let _ = fastflags::write_fastflags(&appdata, &self.config.active_profile);
@@ -302,6 +334,36 @@ impl eframe::App for ExoticaApp {
                 ui.scope(|ui| {
                     ui.set_opacity(alpha);
                     ui.add_space(offset);
+
+                    // БАННЕР ОБНОВЛЕНИЯ
+                    if let Some(ref url) = self.update_url {
+                        egui::Frame::none().fill(Color32::from_rgba_unmultiplied(50, 150, 50, 200)).rounding(12.0).inner_margin(15.0).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🔔 Доступно обновление лаунчера!").size(18.0).strong().color(Color32::WHITE));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if self.update_downloading {
+                                        ui.spinner();
+                                        ui.label("Загрузка...");
+                                    } else {
+                                        if ui.button("Скачать и перезапустить").clicked() {
+                                            self.update_downloading = true;
+                                            let u = url.clone();
+                                            let ctx = ui.ctx().clone();
+                                            std::thread::spawn(move || {
+                                                if let Err(e) = updater::download_and_replace(&u) {
+                                                    eprintln!("Update failed: {}", e);
+                                                }
+                                                ctx.request_repaint();
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(20.0);
+                    }
+
                     match self.active_tab {
                         0 => self.draw_home(ui, card_bg, accent_color),
                         1 => self.draw_settings(ui, card_bg, accent_color),
@@ -311,7 +373,7 @@ impl eframe::App for ExoticaApp {
                 });
             });
             
-        // Окно редактирования списка процессов
+        // Окно редактора процессов
         if self.show_processes_editor {
             egui::Window::new("Настройка процессов для Game Booster")
                 .default_width(300.0)
@@ -344,6 +406,34 @@ impl ExoticaApp {
     fn draw_home(&mut self, ui: &mut egui::Ui, card_bg: Color32, accent: Color32) {
         ui.heading(RichText::new("Панель управления").size(28.0).color(Color32::WHITE));
         ui.add_space(20.0);
+
+        // НОВАЯ КАРТОЧКА: ЗАПУСК ПЛЕЙСА
+        egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255,255,255,20))).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("🚀 Запуск конкретного плейса").size(18.0).strong());
+            ui.add_space(5.0);
+            ui.label(RichText::new("Вставь ссылку на игру или её ID, чтобы запустить её сразу.").size(12.0).color(Color32::GRAY));
+            ui.add_space(15.0);
+            ui.horizontal(|ui| {
+                let text_edit = egui::TextEdit::singleline(&mut self.place_input)
+                    .hint_text("https://www.roblox.com/games/123456/...")
+                    .desired_width(400.0);
+                ui.add(text_edit);
+                if ui.add(egui::Button::new("ЗАПУСТИТЬ").fill(accent).rounding(8.0)).clicked() {
+                    if let Some(id) = extract_place_id(&self.place_input) {
+                        let _ = Command::new("cmd")
+                            .args(["/C", "start", &format!("roblox://experiences/start?placeId={}", id)])
+                            .spawn();
+                        self.status = format!("Запуск плейса {}", id);
+                    } else {
+                        self.status = "Неверная ссылка на плейс".to_string();
+                    }
+                }
+            });
+        });
+        ui.add_space(20.0);
+
+        // ПРОФИЛИ ОПТИМИЗАЦИИ
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("Профиль оптимизации").size(18.0).strong());
@@ -357,6 +447,8 @@ impl ExoticaApp {
             });
         });
         ui.add_space(20.0);
+        
+        // FPS
         egui::Frame::none().fill(card_bg).rounding(12.0).inner_margin(25.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -461,7 +553,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(ExoticaApp::default()))
+            Box::new(ExoticaApp::default()) // <--- Убрали Ok()
         }),
     )
 }
